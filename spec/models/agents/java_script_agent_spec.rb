@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe Agents::JavaScriptAgent do
   before do
@@ -21,6 +21,21 @@ describe Agents::JavaScriptAgent do
       expect(@agent).not_to be_valid
       @agent.options.delete('code')
       expect(@agent).not_to be_valid
+    end
+
+    it "checks for a valid 'language', but allows nil" do
+      expect(@agent).to be_valid
+      @agent.options['language'] = ''
+      expect(@agent).to be_valid
+      @agent.options.delete('language')
+      expect(@agent).to be_valid
+      @agent.options['language'] = 'foo'
+      expect(@agent).not_to be_valid
+
+      %w[javascript JavaScript coffeescript CoffeeScript].each do |valid_language|
+        @agent.options['language'] = valid_language
+        expect(@agent).to be_valid
+      end
     end
 
     it "accepts a credential, but it must exist" do
@@ -74,11 +89,10 @@ describe Agents::JavaScriptAgent do
       }.to change { Event.count }.by(2)
     end
 
-
     describe "using credentials as code" do
       before do
         @agent.user.user_credentials.create :credential_name => 'code-foo', :credential_value => 'Agent.check = function() { this.log("ran it"); };'
-        @agent.options['code'] = 'credential:code-foo'
+        @agent.options['code'] = "credential:code-foo\n\n"
         @agent.save!
       end
 
@@ -162,6 +176,20 @@ describe Agents::JavaScriptAgent do
       end
     end
 
+    describe "escaping and unescaping HTML" do
+      it "can escape and unescape html with this.escapeHtml and this.unescapeHtml in the javascript environment" do
+        @agent.options['code'] = 'Agent.check = function() { this.createEvent({ escaped: this.escapeHtml(\'test \"escaping\" <characters>\'), unescaped: this.unescapeHtml(\'test &quot;unescaping&quot; &lt;characters&gt;\')}); };'
+        @agent.save!
+        expect {
+          expect {
+            @agent.check
+          }.not_to change { AgentLog.count }
+        }.to change { Event.count}.by(1)
+        created_event = @agent.events.last
+        expect(created_event.payload).to eq({ 'escaped' => 'test &quot;escaping&quot; &lt;characters&gt;', 'unescaped' => 'test "unescaping" <characters>'})
+      end
+    end
+
     describe "getting incoming events" do
       it "can access incoming events in the JavaScript enviroment via this.incomingEvents" do
         event = Event.new
@@ -222,6 +250,46 @@ describe Agents::JavaScriptAgent do
 
           }.not_to change { AgentLog.count }
         }.not_to change { Event.count }
+      end
+    end
+
+    describe "using CoffeeScript" do
+      it "will accept a 'language' of 'CoffeeScript'" do
+        @agent.options['code'] = 'Agent.check = -> this.log("hello from coffeescript")'
+        @agent.options['language'] = 'CoffeeScript'
+        @agent.save!
+        expect {
+          @agent.check
+        }.not_to raise_error
+        expect(AgentLog.last.message).to eq("hello from coffeescript")
+      end
+    end
+
+    describe "user credentials" do
+      it "can access an existing credential" do
+        @agent.send(:set_credential, 'test', 'hello')
+        @agent.options['code'] = 'Agent.check = function() { this.log(this.credential("test")); };'
+        @agent.save!
+        @agent.check
+        expect(AgentLog.last.message).to eq("hello")
+      end
+
+      it "will create a new credential" do
+        @agent.options['code'] = 'Agent.check = function() { this.credential("test","1234"); };'
+        @agent.save!
+        expect {
+          @agent.check
+        }.to change(UserCredential, :count).by(1)
+      end
+
+      it "updates an existing credential" do
+        @agent.send(:set_credential, 'test', 1234)
+        @agent.options['code'] = 'Agent.check = function() { this.credential("test","12345"); };'
+        @agent.save!
+        expect {
+          @agent.check
+        }.to change(UserCredential, :count).by(0)
+        expect(@agent.user.user_credentials.last.credential_value).to eq('12345')
       end
     end
   end

@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 require 'time'
 
 describe Agents::FtpsiteAgent do
@@ -9,7 +9,7 @@ describe Agents::FtpsiteAgent do
         'url' => "ftp://ftp.example.org/pub/releases/",
         'patterns' => ["example*.tar.gz"],
       }
-      @checker = Agents::FtpsiteAgent.new(:name => "Example", :options => @site, :keep_events_for => 2)
+      @checker = Agents::FtpsiteAgent.new(:name => "Example", :options => @site, :keep_events_for => 2.days)
       @checker.user = users(:bob)
       @checker.save!
     end
@@ -26,7 +26,7 @@ describe Agents::FtpsiteAgent do
 
       it "should validate the integer fields" do
         @checker.options['expected_update_period_in_days'] = "nonsense"
-        expect { @checker.save! }.to raise_error;
+        expect { @checker.save! }.to raise_error(/Invalid expected_update_period_in_days format/);
         @checker.options = @site
       end
 

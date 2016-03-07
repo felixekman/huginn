@@ -21,11 +21,44 @@ module LiquidDroppable
   end
 
   included do
-    const_set :Drop, Kernel.const_set("#{name}Drop", Class.new(Drop))
+    const_set :Drop,
+              if Kernel.const_defined?(drop_name = "#{name}Drop")
+                Kernel.const_get(drop_name)
+              else
+                Kernel.const_set(drop_name, Class.new(Drop))
+              end
   end
 
   def to_liquid
     self.class::Drop.new(self)
+  end
+
+  class MatchDataDrop < Liquid::Drop
+    def initialize(object)
+      @object = object
+    end
+
+    %w[pre_match post_match names size].each { |attr|
+      define_method(attr) {
+        @object.__send__(attr)
+      }
+    }
+
+    def to_s
+      @object[0]
+    end
+
+    def before_method(method)
+      @object[method]
+    rescue IndexError
+      nil
+    end
+  end
+
+  class ::MatchData
+    def to_liquid
+      MatchDataDrop.new(self)
+    end
   end
 
   require 'uri'

@@ -1,11 +1,17 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe JobsController do
-
   describe "GET index" do
     before do
-      Delayed::Job.create!
-      Delayed::Job.create!
+      async_handler_yaml =
+        "--- !ruby/object:ActiveJob::QueueAdapters::DelayedJobAdapter::JobWrapper\njob_data:\n  job_class: AgentCheckJob\n  job_id: 123id\n  queue_name: default\n  arguments:\n  - %d\n"
+
+      Delayed::Job.create!(handler: async_handler_yaml % [agents(:jane_website_agent).id])
+      Delayed::Job.create!(handler: async_handler_yaml % [agents(:bob_website_agent).id])
+      Delayed::Job.create!(handler: async_handler_yaml % [agents(:jane_weather_agent).id])
+      agents(:jane_website_agent).destroy
+      Delayed::Job.create!(handler: async_handler_yaml % [agents(:bob_weather_agent).id], locked_at: Time.now, locked_by: 'test')
+
       expect(Delayed::Job.count).to be > 0
     end
 
@@ -19,7 +25,7 @@ describe JobsController do
       expect(users(:jane)).to be_admin
       sign_in users(:jane)
       get :index
-      expect(assigns(:jobs).length).to eq(2)
+      expect(assigns(:jobs).length).to eq(4)
     end
   end
 
@@ -64,12 +70,26 @@ describe JobsController do
     before do
       @failed = Delayed::Job.create(failed_at: Time.now - 1.minute)
       @running = Delayed::Job.create(locked_at: Time.now, locked_by: 'test')
+      @pending = Delayed::Job.create
       sign_in users(:jane)
     end
 
     it "just destroy failed jobs" do
-      expect { delete :destroy_failed, id: @failed.id }.to change(Delayed::Job, :count).by(-1)
-      expect { delete :destroy_failed, id: @running.id }.to change(Delayed::Job, :count).by(0)
+      expect { delete :destroy_failed }.to change(Delayed::Job, :count).by(-1)
+    end
+  end
+
+  describe "DELETE destroy_all" do
+    before do
+      @failed = Delayed::Job.create(failed_at: Time.now - 1.minute)
+      @running = Delayed::Job.create(locked_at: Time.now, locked_by: 'test')
+      @pending = Delayed::Job.create
+      sign_in users(:jane)
+    end
+
+    it "destroys all jobs" do
+      expect { delete :destroy_all }.to change(Delayed::Job, :count).by(-2)
+      expect(Delayed::Job.find(@running.id)).to be
     end
   end
 end

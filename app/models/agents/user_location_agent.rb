@@ -4,13 +4,17 @@ module Agents
   class UserLocationAgent < Agent
     cannot_be_scheduled!
 
-    description do
-      <<-MD
-        The UserLocationAgent creates events based on WebHook POSTS that contain a `latitude` and `longitude`.  You can use the [POSTLocation](https://github.com/cantino/post_location) or [PostGPS](https://github.com/chriseidhof/PostGPS) iOS app to post your location.
+    gem_dependency_check { defined?(Haversine) }
 
+    description do <<-MD
+      The User Location Agent creates events based on WebHook POSTS that contain a `latitude` and `longitude`.  You can use the [POSTLocation](https://github.com/cantino/post_location) or [PostGPS](https://github.com/chriseidhof/PostGPS) iOS app to post your location to `https://#{ENV['DOMAIN']}/users/#{user.id}/update_location/:secret` where `:secret` is specified in your options.
 
-        Your POST path will be `https://#{ENV['DOMAIN']}/users/#{user.id}/update_location/:secret` where `:secret` is specified in your options.
-      MD
+      #{'## Include `haversine` in your Gemfile to use this Agent!' if dependencies_missing?}
+
+      If you want to only keep more precise locations, set `max_accuracy` to the upper bound, in meters. The default name for this field is `accuracy`, but you can change this by setting a value for `accuracy_field`.
+
+      If you want to require a certain distance traveled, set `min_distance` to the minimum distance, in meters. Note that GPS readings and the measurement itself aren't exact, so don't rely on this for precision filtering.
+    MD
     end
 
     event_description <<-MD
@@ -34,7 +38,11 @@ module Agents
     end
 
     def default_options
-      { 'secret' => SecureRandom.hex(7) }
+      {
+        'secret' => SecureRandom.hex(7),
+        'max_accuracy' => '',
+        'min_distance' => '',
+      }
     end
 
     def validate_options
@@ -68,8 +76,27 @@ module Agents
     def handle_payload(payload)
       location = Location.new(payload)
 
-      if location.present?
+      accuracy_field = interpolated[:accuracy_field].presence || "accuracy"
+
+      def accurate_enough?(payload, accuracy_field)
+        !interpolated[:max_accuracy].present? || !payload[accuracy_field] || payload[accuracy_field].to_i < interpolated[:max_accuracy].to_i
+      end
+
+      def far_enough?(payload)
+        if memory['last_location'].present?
+          travel = Haversine.distance(memory['last_location']['latitude'].to_i, memory['last_location']['longitude'].to_i, payload['latitude'].to_i, payload['longitude'].to_i).to_meters
+          !interpolated[:min_distance].present? || travel > interpolated[:min_distance].to_i
+        else # for the first run, before "last_location" exists
+          true
+        end
+      end
+
+      if location.present? && accurate_enough?(payload, accuracy_field) && far_enough?(payload)
+        if interpolated[:max_accuracy].present? && !payload[accuracy_field].present?
+          log "Accuracy field missing; all locations will be kept"
+        end
         create_event payload: payload, location: location
+        memory["last_location"] = payload
       end
     end
   end

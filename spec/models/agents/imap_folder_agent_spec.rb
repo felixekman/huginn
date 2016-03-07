@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 require 'time'
 
 describe Agents::ImapFolderAgent do
@@ -14,7 +14,7 @@ describe Agents::ImapFolderAgent do
         'conditions' => {
         }
       }
-      @checker = Agents::ImapFolderAgent.new(:name => 'Example', :options => @site, :keep_events_for => 2)
+      @checker = Agents::ImapFolderAgent.new(:name => 'Example', :options => @site, :keep_events_for => 2.days)
       @checker.user = users(:bob)
       @checker.save!
 
@@ -36,8 +36,12 @@ describe Agents::ImapFolderAgent do
             all_parts.find { |part|
               part.mime_type == type
             }
-          }.compact
+          }.compact.map! { |part|
+            part.extend(Agents::ImapFolderAgent::Message::Scrubbed)
+          }
         end
+
+        include Agents::ImapFolderAgent::Message::Scrubbed
       }
 
       @mails = [
@@ -179,6 +183,14 @@ describe Agents::ImapFolderAgent do
         expect { @checker.check }.not_to change { Event.count }
       end
 
+      it 'should not fail when a condition on Cc is given and a mail does not have the field' do
+        @checker.options['conditions']['cc'] = 'John.Doe@*'
+
+        expect {
+          expect { @checker.check }.not_to change { Event.count }
+        }.not_to raise_exception
+      end
+
       it 'should perform regexp matching and save named captures' do
         @checker.options['conditions'].update(
           'subject' => '\ARe: (?<a>.+)',
@@ -252,6 +264,49 @@ describe Agents::ImapFolderAgent do
           stub(mail).mark_as_read.once
         }
         expect { @checker.check }.to change { Event.count }.by(1)
+      end
+
+      describe 'processing mails with a broken From header value' do
+        before do
+          # "from" patterns work against mail addresses and not
+          # against text parts, so these mails should be skipped if a
+          # "from" condition is given.
+          @mails.first.header['from'] = '.'
+          @mails.last.header['from'] = '@'
+        end
+
+        it 'should ignore them without failing if a "from" condition is given' do
+          @checker.options['conditions']['from'] = '*'
+
+          expect {
+            expect { @checker.check }.not_to change { Event.count }
+          }.not_to raise_exception
+        end
+      end
+    end
+  end
+
+  describe 'Agents::ImapFolderAgent::Message::Scrubbed' do
+    before do
+      @class = Class.new do
+        def subject
+          "broken\xB7subject\xB6"
+        end
+
+        def body
+          "broken\xB7body\xB6"
+        end
+
+        include Agents::ImapFolderAgent::Message::Scrubbed
+      end
+
+      @object = @class.new
+    end
+
+    describe '#scrubbed' do
+      it 'should return a scrubbed string' do
+        expect(@object.scrubbed(:subject)).to eq("broken<b7>subject<b6>")
+        expect(@object.scrubbed(:body)).to eq("broken<b7>body<b6>")
       end
     end
   end

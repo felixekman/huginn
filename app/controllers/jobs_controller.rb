@@ -48,7 +48,17 @@ class JobsController < ApplicationController
     end
   end
 
+  def destroy_all
+    Delayed::Job.where(locked_at: nil).delete_all
+
+    respond_to do |format|
+      format.html { redirect_to jobs_path, notice: "All jobs removed." }
+      format.json { render json: '', status: :ok }
+    end
+  end
+
   private
+
   def running?
     (@job.locked_at || @job.locked_by) && @job.failed_at.nil?
   end

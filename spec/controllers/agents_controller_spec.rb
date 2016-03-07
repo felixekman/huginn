@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe AgentsController do
   def valid_attributes(options = {})
@@ -21,7 +21,7 @@ describe AgentsController do
   describe "POST handle_details_post" do
     it "passes control to handle_details_post on the agent" do
       sign_in users(:bob)
-      post :handle_details_post, :id => agents(:bob_manual_event_agent).to_param, :payload => { :foo => "bar" }
+      post :handle_details_post, :id => agents(:bob_manual_event_agent).to_param, :payload => { :foo => "bar" }.to_json
       expect(JSON.parse(response.body)).to eq({ "success" => true })
       expect(agents(:bob_manual_event_agent).events.last.payload).to eq({ 'foo' => "bar" })
     end
@@ -29,7 +29,7 @@ describe AgentsController do
     it "can only be accessed by the Agent's owner" do
       sign_in users(:jane)
       expect {
-        post :handle_details_post, :id => agents(:bob_manual_event_agent).to_param, :payload => { :foo => :bar }
+        post :handle_details_post, :id => agents(:bob_manual_event_agent).to_param, :payload => { :foo => :bar }.to_json
       }.to raise_error(ActiveRecord::RecordNotFound)
     end
   end
@@ -87,19 +87,35 @@ describe AgentsController do
     end
   end
 
-  describe "GET new with :id" do
-    it "opens a clone of a given Agent" do
-      sign_in users(:bob)
-      get :new, :id => agents(:bob_website_agent).to_param
-      expect(assigns(:agent).attributes).to eq(users(:bob).agents.build_clone(agents(:bob_website_agent)).attributes)
+  describe "GET new" do
+    describe "with :id" do
+      it "opens a clone of a given Agent" do
+        sign_in users(:bob)
+        get :new, :id => agents(:bob_website_agent).to_param
+        expect(assigns(:agent).attributes).to eq(users(:bob).agents.build_clone(agents(:bob_website_agent)).attributes)
+      end
+
+      it "only allows the current user to clone his own Agent" do
+        sign_in users(:bob)
+
+        expect {
+          get :new, :id => agents(:jane_website_agent).to_param
+        }.to raise_error(ActiveRecord::RecordNotFound)
+      end
     end
 
-    it "only allows the current user to clone his own Agent" do
-      sign_in users(:bob)
+    describe "with a scenario_id" do
+      it 'populates the assigned agent with the scenario' do
+        sign_in users(:bob)
+        get :new, :scenario_id => scenarios(:bob_weather).id
+        expect(assigns(:agent).scenario_ids).to eq([scenarios(:bob_weather).id])
+      end
 
-      expect {
-        get :new, :id => agents(:jane_website_agent).to_param
-      }.to raise_error(ActiveRecord::RecordNotFound)
+      it "does not see other user's scenarios" do
+        sign_in users(:bob)
+        get :new, :scenario_id => scenarios(:jane_weather).id
+        expect(assigns(:agent).scenario_ids).to eq([])
+      end
     end
   end
 
@@ -305,6 +321,112 @@ describe AgentsController do
 
       delete :destroy, :id => agents(:bob_weather_agent).to_param, :return => scenario_path(scenarios(:bob_weather)).to_param
       expect(response).to redirect_to scenario_path(scenarios(:bob_weather))
+    end
+  end
+
+  describe "#form_configurable actions" do
+    before(:each) do
+      @params = {attribute: 'auth_token', agent: valid_attributes(:type => "Agents::HipchatAgent", options: {auth_token: '12345'})}
+      sign_in users(:bob)
+    end
+    describe "POST validate" do
+
+      it "returns with status 200 when called with a valid option" do
+        any_instance_of(Agents::HipchatAgent) do |klass|
+          stub(klass).validate_option { true }
+        end
+
+        post :validate, @params
+        expect(response.status).to eq 200
+      end
+
+      it "returns with status 403 when called with an invalid option" do
+        any_instance_of(Agents::HipchatAgent) do |klass|
+          stub(klass).validate_option { false }
+        end
+
+        post :validate, @params
+        expect(response.status).to eq 403
+      end
+    end
+
+    describe "POST complete" do
+      it "callsAgent#complete_option and renders json" do
+        any_instance_of(Agents::HipchatAgent) do |klass|
+          stub(klass).complete_option { [{name: 'test', value: 1}] }
+        end
+
+        post :complete, @params
+        expect(response.status).to eq 200
+        expect(response.header['Content-Type']).to include('application/json')
+
+      end
+    end
+  end
+
+  describe "POST dry_run" do
+    before do
+      stub_request(:any, /xkcd/).to_return(body: File.read(Rails.root.join("spec/data_fixtures/xkcd.html")), status: 200)
+    end
+
+    it "does not actually create any agent, event or log" do
+      sign_in users(:bob)
+      expect {
+        post :dry_run, agent: valid_attributes()
+      }.not_to change {
+        [users(:bob).agents.count, users(:bob).events.count, users(:bob).logs.count]
+      }
+      json = JSON.parse(response.body)
+      expect(json['log']).to be_a(String)
+      expect(json['events']).to be_a(String)
+      expect(JSON.parse(json['events']).map(&:class)).to eq([Hash])
+      expect(json['memory']).to be_a(String)
+      expect(JSON.parse(json['memory'])).to be_a(Hash)
+    end
+
+    it "does not actually update an agent" do
+      sign_in users(:bob)
+      agent = agents(:bob_weather_agent)
+      expect {
+        post :dry_run, id: agent, agent: valid_attributes(name: 'New Name')
+      }.not_to change {
+        [users(:bob).agents.count, users(:bob).events.count, users(:bob).logs.count, agent.name, agent.updated_at]
+      }
+    end
+
+    it "accepts an event" do
+      sign_in users(:bob)
+      agent = agents(:bob_website_agent)
+      agent.options['url_from_event'] = '{{ url }}'
+      agent.save!
+      url_from_event = "http://xkcd.com/?from_event=1".freeze
+      expect {
+        post :dry_run, id: agent, event: { url: url_from_event }
+      }.not_to change {
+        [users(:bob).agents.count, users(:bob).events.count, users(:bob).logs.count, agent.name, agent.updated_at]
+      }
+      json = JSON.parse(response.body)
+      expect(json['log']).to match(/^I, .* : Fetching #{Regexp.quote(url_from_event)}$/)
+    end
+  end
+
+  describe "DELETE memory" do
+    it "clears memory of the agent" do
+      agent = agents(:bob_website_agent)
+      agent.update!(memory: { "test" => 42 })
+      sign_in users(:bob)
+      delete :destroy_memory, id: agent.to_param
+      expect(agent.reload.memory).to eq({})
+    end
+
+    it "does not clear memory of an agent not owned by the current user" do
+      agent = agents(:jane_website_agent)
+      agent.update!(memory: { "test" => 42 })
+      sign_in users(:bob)
+      expect {
+        delete :destroy_memory, id: agent.to_param
+      }.to raise_error(ActiveRecord::RecordNotFound)
+      expect(agent.reload.memory).to eq({ "test" => 42})
     end
   end
 end

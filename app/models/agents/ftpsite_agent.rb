@@ -9,8 +9,10 @@ module Agents
     gem_dependency_check { defined?(Net::FTP) && defined?(Net::FTP::List) }
 
     description <<-MD
+      The FTP Site Agent checks an FTP site and creates Events based on newly uploaded files in a directory.
+
       #{'## Include `net-ftp-list` in your Gemfile to use this Agent!' if dependencies_missing?}
-      The FtpsiteAgent checks a FTP site and creates Events based on newly uploaded files in a directory.
+
 
       Specify a `url` that represents a directory of an FTP site to watch, and a list of `patterns` to match against file names.
 
@@ -194,7 +196,7 @@ module Agents
     end
 
     def uri_path_escape(string)
-      str = string.dup.force_encoding(Encoding::ASCII_8BIT)  # string.b in Ruby >=2.0
+      str = string.b
       str.gsub!(/([^A-Za-z0-9\-._~!$&()*+,=@]+)/) { |m|
         '%' + m.unpack('H2' * m.bytesize).join('%').upcase
       }

@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 
 shared_examples_for AgentControllerConcern do
   describe "preconditions" do
@@ -40,6 +40,15 @@ shared_examples_for AgentControllerConcern do
           agent.control_targets = [agents(:bob_rain_notifier_agent)]
           expect(agent).to be_valid
         }
+      end
+
+      it "should ensure that 'configure_options' exists in options when the action is 'configure'" do
+        agent.options['action'] = 'configure'
+        expect(agent).not_to be_valid
+        agent.options['configure_options'] = {}
+        expect(agent).not_to be_valid
+        agent.options['configure_options'] = { 'key' => 'value' }
+        expect(agent).to be_valid
       end
     end
   end
@@ -106,6 +115,37 @@ shared_examples_for AgentControllerConcern do
 
       agent.control!
       expect(agent.control_targets.reload).to all(satisfy { |a| !a.disabled? })
+    end
+
+    it "should configure targets" do
+      agent.options['action'] = 'configure'
+      agent.options['configure_options'] = { 'url' => 'http://some-new-url.com/{{"something" | upcase}}' }
+      agent.save!
+      old_options = agents(:bob_website_agent).options
+
+      agent.control!
+
+      expect(agent.control_targets.reload).to all(satisfy { |a| a.options['url'] == 'http://some-new-url.com/SOMETHING' })
+      expect(agents(:bob_website_agent).reload.options).to eq(old_options.merge('url' => 'http://some-new-url.com/SOMETHING'))
+    end
+
+    it "should configure targets with nested objects" do
+      agent.control_targets << agents(:bob_data_output_agent)
+      agent.options['action'] = 'configure'
+      agent.options['configure_options'] = { 
+        template: {
+          item: {
+           title: "changed"
+          }
+        }
+      }
+      agent.save!
+      old_options = agents(:bob_data_output_agent).options
+
+      agent.control!
+
+      expect(agent.control_targets.reload).to all(satisfy { |a| a.options['template'] && a.options['template']['item'] && (a.options['template']['item']['title'] == 'changed') })
+      expect(agents(:bob_data_output_agent).reload.options).to eq(old_options.deep_merge(agent.options['configure_options']))
     end
   end
 end

@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe Agents::HipchatAgent do
   before(:each) do
@@ -47,6 +47,31 @@ describe Agents::HipchatAgent do
       expect(@checker).not_to be_valid
       @checker.user.user_credentials.create :credential_name => 'hipchat_auth_token', :credential_value => 'something'
       expect(@checker.reload).to be_valid
+    end
+  end
+
+  describe "#validate_auth_token" do
+    it "should return true when valid" do
+      any_instance_of(HipChat::Client) do |klass|
+        stub(klass).rooms { true }
+      end
+      expect(@checker.validate_auth_token).to be true
+    end
+
+    it "should return false when invalid" do
+      any_instance_of(HipChat::Client) do |klass|
+        stub(klass).rooms { raise HipChat::UnknownResponseCode.new }
+      end
+      expect(@checker.validate_auth_token).to be false
+    end
+  end
+
+  describe "#complete_room_name" do
+    it "should return a array of hashes" do
+      any_instance_of(HipChat::Client) do |klass|
+        stub(klass).rooms { [OpenStruct.new(name: 'test'), OpenStruct.new(name: 'test1')] }
+      end
+      expect(@checker.complete_room_name).to eq [{text: 'test', id: 'test'},{text: 'test1', id: 'test1'}]
     end
   end
 

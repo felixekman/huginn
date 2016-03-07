@@ -57,6 +57,8 @@ module ApplicationHelper
     case provider.to_sym
     when :twitter, :tumblr, :github, :dropbox
       icon_tag("fa-#{provider}")
+    when :wunderlist
+      icon_tag("fa-list")
     else
       icon_tag("fa-lock")
     end
@@ -78,10 +80,17 @@ module ApplicationHelper
   end
 
   def service_label(service)
+    return if service.nil?
     content_tag :span, [
       omniauth_provider_icon(service.provider),
       service_label_text(service)
     ].join.html_safe, class: "label label-default label-service service-#{service.provider}"
+  end
+
+  def load_ace_editor!
+    unless content_for?(:ace_editor_script)
+      content_for :ace_editor_script, javascript_include_tag('ace')
+    end
   end
 
   def highlighted?(id)

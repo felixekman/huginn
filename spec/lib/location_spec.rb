@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe Location do
   let(:location) {
@@ -30,10 +30,14 @@ describe Location do
     expect(location['lat']).to eq 2.0
   end
 
+  it "has a convenience accessor for combined latitude and longitude" do
+    expect(location.latlng).to eq "2.0,3.0"
+  end
+
   it "does not allow hash-style assignment" do
     expect {
       location[:lat] = 2.0
-    }.to raise_error
+    }.to raise_error(NoMethodError)
   end
 
   it "ignores invalid values" do
@@ -60,6 +64,7 @@ describe Location do
       '{{location.latitude}}' => '2.0',
       '{{location.lng}}' => '3.0',
       '{{location.longitude}}' => '3.0',
+      '{{location.latlng}}' => '2.0,3.0',
     }.each { |template, result|
       expect(Liquid::Template.parse(template).render('location' => location.to_liquid)).to eq(result),
         "expected #{template.inspect} to expand to #{result.inspect}"

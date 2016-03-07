@@ -12,6 +12,8 @@ class Agent < ActiveRecord::Base
   include LiquidInterpolatable
   include HasGuid
   include LiquidDroppable
+  include DryRunnable
+  include SortableEvents
 
   markdown_class_attributes :description, :event_description
 
@@ -20,7 +22,7 @@ class Agent < ActiveRecord::Base
   SCHEDULES = %w[every_1m every_2m every_5m every_10m every_30m every_1h every_2h every_5h every_12h every_1d every_2d every_7d
                  midnight 1am 2am 3am 4am 5am 6am 7am 8am 9am 10am 11am noon 1pm 2pm 3pm 4pm 5pm 6pm 7pm 8pm 9pm 10pm 11pm never]
 
-  EVENT_RETENTION_SCHEDULES = [["Forever", 0], ["1 day", 1], *([2, 3, 4, 5, 7, 14, 21, 30, 45, 90, 180, 365].map {|n| ["#{n} days", n] })]
+  EVENT_RETENTION_SCHEDULES = [["Forever", 0], ['1 hour', 1.hour], ['6 hours', 6.hours], ["1 day", 1.day], *([2, 3, 4, 5, 7, 14, 21, 30, 45, 90, 180, 365].map {|n| ["#{n} days", n.days] })]
 
   attr_accessible :options, :memory, :name, :type, :schedule, :controller_ids, :control_target_ids, :disabled, :source_ids, :scenario_ids, :keep_events_for, :propagate_immediately, :drop_pending_events
 
@@ -45,7 +47,7 @@ class Agent < ActiveRecord::Base
   belongs_to :user, :inverse_of => :agents
   belongs_to :service, :inverse_of => :agents
   has_many :events, -> { order("events.id desc") }, :dependent => :delete_all, :inverse_of => :agent
-  has_one  :most_recent_event, :inverse_of => :agent, :class_name => "Event", :order => "events.id desc"
+  has_one  :most_recent_event, -> { order("events.id desc") }, :inverse_of => :agent, :class_name => "Event"
   has_many :logs,  -> { order("agent_logs.id desc") }, :dependent => :delete_all, :inverse_of => :agent, :class_name => "AgentLog"
   has_many :received_events, -> { order("events.id desc") }, :through => :sources, :class_name => "Event", :source => :events
   has_many :links_as_source, :dependent => :delete_all, :foreign_key => "source_id", :class_name => "Link", :inverse_of => :source
@@ -59,7 +61,8 @@ class Agent < ActiveRecord::Base
   has_many :scenario_memberships, :dependent => :destroy, :inverse_of => :agent
   has_many :scenarios, :through => :scenario_memberships, :inverse_of => :agents
 
-  scope :active, -> { where(disabled: false) }
+  scope :active,   -> { where(disabled: false) }
+  scope :inactive, -> { where(disabled: true) }
 
   scope :of_type, lambda { |type|
     type = case type
@@ -88,6 +91,10 @@ class Agent < ActiveRecord::Base
     # Implement me in your subclass of Agent.
   end
 
+  def is_form_configurable?
+    false
+  end
+
   def receive_web_request(params, method, format)
     # Implement me in your subclass of Agent.
     ["not implemented", 404]
@@ -98,12 +105,19 @@ class Agent < ActiveRecord::Base
     raise "Implement me in your subclass"
   end
 
-  def create_event(attrs)
+  def build_event(event)
+    event = events.build(event) if event.is_a?(Hash)
+    event.agent = self
+    event.user = user
+    event.expires_at ||= new_event_expiration_date
+    event
+  end
+
+  def create_event(event)
     if can_create_events?
-      events.create!({
-         :user => user,
-         :expires_at => new_event_expiration_date
-      }.merge(attrs))
+      event = build_event(event)
+      event.save!
+      event
     else
       error "This Agent cannot create events!"
     end
@@ -124,14 +138,14 @@ class Agent < ActiveRecord::Base
   end
 
   def new_event_expiration_date
-    keep_events_for > 0 ? keep_events_for.days.from_now : nil
+    keep_events_for > 0 ? keep_events_for.seconds.from_now : nil
   end
 
   def update_event_expirations!
     if keep_events_for == 0
       events.update_all :expires_at => nil
     else
-      events.update_all "expires_at = " + rdbms_date_add("created_at", "DAY", keep_events_for.to_i)
+      events.update_all "expires_at = " + rdbms_date_add("created_at", "SECOND", keep_events_for.to_i)
     end
   end
 
@@ -190,8 +204,15 @@ class Agent < ActiveRecord::Base
     self.class.can_control_other_agents?
   end
 
+  def can_dry_run?
+    self.class.can_dry_run?
+  end
+
+  def no_bulk_receive?
+    self.class.no_bulk_receive?
+  end
+
   def log(message, options = {})
-    puts "Agent##{id}: #{message}" unless Rails.env.test?
     AgentLog.log_for_agent(self, message, options)
   end
 
@@ -325,6 +346,22 @@ class Agent < ActiveRecord::Base
       include? AgentControllerConcern
     end
 
+    def can_dry_run!
+      @can_dry_run = true
+    end
+
+    def can_dry_run?
+      !!@can_dry_run
+    end
+
+    def no_bulk_receive!
+      @no_bulk_receive = true
+    end
+
+    def no_bulk_receive?
+      !!@no_bulk_receive
+    end
+
     def gem_dependency_check
       @gem_dependencies_checked = true
       @gem_dependencies_met = yield
@@ -340,7 +377,7 @@ class Agent < ActiveRecord::Base
     def receive!(options={})
       Agent.transaction do
         scope = Agent.
-                select("agents.id AS receiver_agent_id, sources.id AS source_agent_id, events.id AS event_id").
+                select("agents.id AS receiver_agent_id, events.id AS event_id").
                 joins("JOIN links ON (links.receiver_id = agents.id)").
                 joins("JOIN agents AS sources ON (links.source_id = sources.id)").
                 joins("JOIN events ON (events.agent_id = sources.id AND events.id > links.event_id_at_creation)").
@@ -352,43 +389,34 @@ class Agent < ActiveRecord::Base
         sql = scope.to_sql()
 
         agents_to_events = {}
-        Agent.connection.select_rows(sql).each do |receiver_agent_id, source_agent_id, event_id|
+        Agent.connection.select_rows(sql).each do |receiver_agent_id, event_id|
           agents_to_events[receiver_agent_id.to_i] ||= []
           agents_to_events[receiver_agent_id.to_i] << event_id
         end
 
-        event_ids = agents_to_events.values.flatten.uniq.compact
-
         Agent.where(:id => agents_to_events.keys).each do |agent|
+          event_ids = agents_to_events[agent.id].uniq
           agent.update_attribute :last_checked_event_id, event_ids.max
-          Agent.async_receive(agent.id, agents_to_events[agent.id].uniq)
+
+          if agent.no_bulk_receive?
+            event_ids.each { |event_id| Agent.async_receive(agent.id, [event_id]) }
+          else
+            Agent.async_receive(agent.id, event_ids)
+          end
         end
 
         {
           :agent_count => agents_to_events.keys.length,
-          :event_count => event_ids.length
+          :event_count => agents_to_events.values.flatten.uniq.compact.length
         }
       end
     end
 
-    # Given an Agent id and an array of Event ids, load the Agent, call #receive on it with the Event objects, and then
-    # save it with an updated `last_receive_at` timestamp.
-    #
-    # This method is tagged with `handle_asynchronously` and will be delayed and run with delayed_job.  It accepts Agent
-    # and Event ids instead of a literal ActiveRecord models because it is preferable to serialize delayed_jobs with ids.
+    # This method will enqueue an AgentReceiveJob job. It accepts Agent and Event ids instead of a literal ActiveRecord
+    # models because it is preferable to serialize jobs with ids.
     def async_receive(agent_id, event_ids)
-      agent = Agent.find(agent_id)
-      begin
-        return if agent.unavailable?
-        agent.receive(Event.where(:id => event_ids))
-        agent.last_receive_at = Time.now
-        agent.save!
-      rescue => e
-        agent.error "Exception during receive. #{e.message}: #{e.backtrace.join("\n")}"
-        raise
-      end
+      AgentReceiveJob.perform_later(agent_id, event_ids)
     end
-    handle_asynchronously :async_receive
 
     # Given a schedule name, run `check` via `bulk_check` on all Agents with that schedule.
     # This is called by bin/schedule.rb for each schedule in `SCHEDULES`.
@@ -409,24 +437,11 @@ class Agent < ActiveRecord::Base
       end
     end
 
-    # Given an Agent id, load the Agent, call #check on it, and then save it with an updated `last_check_at` timestamp.
-    #
-    # This method is tagged with `handle_asynchronously` and will be delayed and run with delayed_job.  It accepts an Agent
-    # id instead of a literal Agent because it is preferable to serialize delayed_jobs with ids, instead of with the full
-    # Agents.
+    # This method will enqueue an AgentCheckJob job. It accepts an Agent id instead of a literal Agent because it is
+    # preferable to serialize job with ids, instead of with the full Agents.
     def async_check(agent_id)
-      agent = Agent.find(agent_id)
-      begin
-        return if agent.unavailable?
-        agent.check
-        agent.last_check_at = Time.now
-        agent.save!
-      rescue => e
-        agent.error "Exception during check. #{e.message}: #{e.backtrace.join("\n")}"
-        raise
-      end
+      AgentCheckJob.perform_later(agent_id)
     end
-    handle_asynchronously :async_check
   end
 end
 

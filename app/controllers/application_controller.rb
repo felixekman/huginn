@@ -6,6 +6,12 @@ class ApplicationController < ActionController::Base
 
   helper :all
 
+  def redirect_back(fallback_path, *args)
+    redirect_to :back, *args
+  rescue ActionController::RedirectBackError
+    redirect_to fallback_path, *args
+  end
+
   protected
 
   def configure_permitted_parameters
@@ -23,6 +29,20 @@ class ApplicationController < ActionController::Base
     twitter_oauth_check
     basecamp_auth_check
   end
+
+  def filtered_agent_return_link(options = {})
+    case ret = params[:return].presence || options[:return]
+      when "show"
+        if @agent && !@agent.destroyed?
+          agent_path(@agent)
+        else
+          agents_path
+        end
+      when /\A#{(Regexp::escape scenarios_path)}/, /\A#{(Regexp::escape agents_path)}/, /\A#{(Regexp::escape events_path)}/
+        ret
+    end
+  end
+  helper_method :filtered_agent_return_link
 
   private
 
